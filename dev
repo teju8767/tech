@@ -1,0 +1,181 @@
+#include <iostream>
+#include <fstream>
+#include <windows.h>
+#include "PCANBasic.h"
+
+using namespace std;
+
+// Function declarations
+int LoadDLL();
+int UnloadDLL();
+bool GetFunctionAddress(HINSTANCE h_module);
+void StoreReceivedDataToFile(const TPCANMsg* MessageBuffer, const TPCANTimestamp* TimestampBuffer);
+void ReceiveCANData();  // New function to receive data continuously
+
+// Typedefs for PCANBasic functions
+typedef TPCANStatus(__stdcall* PCAN_Initialize)(TPCANHandle Channel, TPCANBaudrate Btr0Btr1);
+typedef TPCANStatus(__stdcall* PCAN_Uninitialize)(TPCANHandle Channel);
+typedef TPCANStatus(__stdcall* PCAN_Read)(TPCANHandle Channel, TPCANMsg* MessageBuffer, TPCANTimestamp* TimestampBuffer);
+typedef TPCANStatus(__stdcall* PCAN_Write)(TPCANHandle Channel, TPCANMsg* MessageBuffer);
+
+// Function pointers
+PCAN_Initialize g_CAN_Initialize;
+PCAN_Uninitialize g_CAN_Uninitialize;
+PCAN_Read g_CAN_Read;
+PCAN_Write g_CAN_Write;
+
+// DLL handle and global variables
+HINSTANCE g_i_DLL;
+TPCANHandle g_hChannel = PCAN_USBBUS1;  // USB Channel 1
+
+// Load the DLL
+int LoadDLL() {
+    if (g_i_DLL == NULL) {
+        g_i_DLL = LoadLibrary("PCANBasic.dll");
+        if (g_i_DLL == NULL) {
+            cout << "ERROR: Cannot load pcanbasic.dll" << endl;
+            return -1;
+        } else {
+            if (GetFunctionAddress(g_i_DLL)) {
+                cout << "Loaded functions from PCANBasic.dll" << endl;
+            } else {
+                cout << "ERROR: Cannot load function addresses" << endl;
+                return -2;
+            }
+        }
+    }
+    return 0;
+}
+
+// Load function addresses from the DLL
+bool GetFunctionAddress(HINSTANCE h_module) {
+    g_CAN_Initialize = (PCAN_Initialize)GetProcAddress(h_module, "CAN_Initialize");
+    g_CAN_Uninitialize = (PCAN_Uninitialize)GetProcAddress(h_module, "CAN_Uninitialize");
+    g_CAN_Read = (PCAN_Read)GetProcAddress(h_module, "CAN_Read");
+    g_CAN_Write = (PCAN_Write)GetProcAddress(h_module, "CAN_Write");
+
+    return g_CAN_Initialize && g_CAN_Uninitialize && g_CAN_Read && g_CAN_Write;
+}
+
+// Unload the DLL
+int UnloadDLL() {
+    if (g_i_DLL) {
+        FreeLibrary(g_i_DLL);
+        g_CAN_Initialize = NULL;
+        g_CAN_Uninitialize = NULL;
+        g_CAN_Read = NULL;
+        g_CAN_Write = NULL;
+        return 0;
+    }
+    return -1;
+}
+// Store received CAN data into a file (append mode)
+void StoreReceivedDataToFile(const TPCANMsg* MessageBuffer, const TPCANTimestamp* TimestampBuffer) {
+    ofstream file("C:/Users/ADMIN/received_data.txt", ios::app); // Append mode
+
+    if (!file.is_open()) {
+        cerr << "Error: Could not open file for writing." << endl;
+        return;
+    }
+
+    // Get the current system time
+    SYSTEMTIME time;
+    GetLocalTime(&time);
+
+    file << "Time: " << time.wHour << ":" << time.wMinute << ":" << time.wSecond << "." << time.wMilliseconds
+         << "  ID: 0x" << hex << MessageBuffer->ID
+         << "  Timestamp: " << dec << TimestampBuffer->millis << " ms"
+         << "  Data: ";
+
+    for (int i = 0; i < MessageBuffer->LEN; i++) {
+        file << hex << static_cast<int>(MessageBuffer->DATA[i]) << " ";
+    }
+    file << endl;
+
+    file.close();
+}
+
+// Function to continuously receive CAN messages
+void ReceiveCANData() {
+    TPCANStatus CANStatus;
+    TPCANMsg MessageBuffer;
+    TPCANTimestamp TimestampBuffer;
+
+    cout << "Listening for CAN messages... (Press Enter to stop)" << endl;
+
+    while (true) {
+        CANStatus = g_CAN_Read(g_hChannel, &MessageBuffer, &TimestampBuffer);
+
+        if (CANStatus == PCAN_ERROR_OK) {
+            cout << "Received CAN frame with ID: 0x " << hex << MessageBuffer.ID << endl;
+            StoreReceivedDataToFile(&MessageBuffer, &TimestampBuffer);
+        }
+
+        Sleep(100); // Small delay to reduce CPU usage
+    }
+}
+
+int main() {
+    int ret;
+    TPCANStatus CANStatus;
+    TPCANMsg SendMessageBuffer;
+
+    cout << "PCAN-Basic Classic CAN" << endl;
+    cout << "Using 500k baud rate" << endl;
+
+    // Load the DLL
+    ret = LoadDLL();
+    if (ret != 0) {
+        cout << "Error loading DLL: " << ret << endl;
+        return -1;
+    }
+
+    // Initialize CAN interface with 500k baud rate
+    CANStatus = g_CAN_Initialize(g_hChannel, PCAN_BAUD_500K);
+    if (CANStatus != PCAN_ERROR_OK) {
+        cout << "Error initializing CAN interface: 0x" << hex << CANStatus << endl;
+        UnloadDLL();
+        return -1;
+    }
+    cout << "CAN interface initialized" << endl;
+
+    // Send a CAN frame
+    cout << "Sending CAN frame..." << endl;
+    SendMessageBuffer.ID = 0x123; // Standard 11-bit ID
+    SendMessageBuffer.LEN = 8;    // 8 bytes of data
+    SendMessageBuffer.MSGTYPE = PCAN_MESSAGE_STANDARD;
+
+    // Example data (8 bytes)
+    SendMessageBuffer.DATA[0] = 0x11;
+    SendMessageBuffer.DATA[1] = 0x22;
+    SendMessageBuffer.DATA[2] = 0x33;
+    SendMessageBuffer.DATA[3] = 0x44;
+    SendMessageBuffer.DATA[4] = 0x55;
+    SendMessageBuffer.DATA[5] = 0x66;
+    SendMessageBuffer.DATA[6] = 0x77;
+    SendMessageBuffer.DATA[7] = 0x88;
+
+    CANStatus = g_CAN_Write(g_hChannel, &SendMessageBuffer);
+    if (CANStatus != PCAN_ERROR_OK) {
+        cout << "Error sending CAN frame: 0x" << hex << CANStatus << endl;
+    } else {
+        cout << "CAN frame sent successfully" << endl;
+    }
+
+    // Start receiving CAN messages
+    ReceiveCANData();
+
+    // Uninitialize the CAN channel and unload the DLL
+    CANStatus = g_CAN_Uninitialize(g_hChannel);
+    if (CANStatus != PCAN_ERROR_OK) {
+        cout << "Error uninitializing CAN channel" << endl;
+    }
+
+    // Unload the DLL
+    UnloadDLL();
+
+    cout << "Press Enter to exit..." << endl;
+    cin.get();
+
+    return 0;
+}
